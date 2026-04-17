@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+
+	"github.com/LeyouHong/samplechain/utils"
 )
 
 // Transaction 代表区块链上的一笔交易
@@ -19,31 +21,13 @@ type Transaction struct {
 	Outputs []TXOutput
 }
 
-// TXOutput 代表一笔交易的输出，即一个未花费的 UTXO
-// Value  : 该输出锁定的代币数量
-// PubKey : 能够解锁该输出的公钥（此处简化为地址字符串）
-type TXOutput struct {
-	Value  int
-	PubKey string
-}
-
-// TXInput 代表一笔交易的输入，指向某个之前交易的输出（UTXO）
-// ID  : 被引用的前序交易 ID
-// Out : 被引用输出在前序交易 Outputs 切片中的索引
-// Sig : 解锁脚本（此处简化为发送方地址，用于证明有权花费该 UTXO）
-type TXInput struct {
-	ID  []byte
-	Out int
-	Sig string
-}
-
 // setID 将交易序列化后取 SHA-256 哈希，作为该交易的唯一 ID
 // 保证交易内容一旦改变，ID 随之改变，防止篡改
 func (tx *Transaction) setID() {
 	var encoded bytes.Buffer
 	encoder := gob.NewEncoder(&encoded)
 	err := encoder.Encode(tx)
-	Handle(err)
+	utils.Handle(err)
 
 	hash := sha256.Sum256(encoded.Bytes())
 	tx.ID = hash[:]
@@ -90,7 +74,7 @@ func NewTransaction(from, to string, amount int, chain *BlockChain) *Transaction
 	// 将所有选中的 UTXO 转换为交易输入
 	for txid, outs := range validOutputs {
 		txID, err := hex.DecodeString(txid)
-		Handle(err)
+		utils.Handle(err)
 
 		for _, out := range outs {
 			input := TXInput{txID, out, from}
@@ -116,16 +100,4 @@ func NewTransaction(from, to string, amount int, chain *BlockChain) *Transaction
 // Coinbase 交易的特征：只有一个输入，且该输入的 ID 为空、索引为 -1
 func (tx *Transaction) IsCoinBase() bool {
 	return len(tx.Inputs) == 1 && len(tx.Inputs[0].ID) == 0 && tx.Inputs[0].Out == -1
-}
-
-// CanUnlock 判断该输入是否由 data（地址）持有者创建
-// 即验证发送方是否有权花费这笔 UTXO（简化版签名验证）
-func (in *TXInput) CanUnlock(data string) bool {
-	return in.Sig == data
-}
-
-// CanBeUnlocked 判断该输出是否可被 data（地址）持有者解锁花费
-// 即验证接收方地址是否匹配（简化版锁定脚本验证）
-func (out *TXOutput) CanBeUnlocked(data string) bool {
-	return out.PubKey == data
 }

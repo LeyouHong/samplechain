@@ -3,9 +3,9 @@ package blockchain
 import (
 	"encoding/hex"
 	"fmt"
-	"os"
 	"runtime"
 
+	"github.com/LeyouHong/samplechain/utils"
 	"github.com/dgraph-io/badger"
 )
 
@@ -42,19 +42,6 @@ type BlockChainIterator struct {
 }
 
 // ========================
-// DB 工具函数
-// ========================
-
-// DBexists 判断区块链数据库是否已经存在
-// 本质：检查 MANIFEST 文件是否存在
-func DBexists() bool {
-	if _, err := os.Stat(dbFile); os.IsNotExist(err) {
-		return false
-	}
-	return true
-}
-
-// ========================
 // 初始化 & 加载区块链
 // ========================
 
@@ -69,7 +56,7 @@ func DBexists() bool {
 //   - key = block hash → value = block data
 //   - key = "lh" → value = latest hash
 func InitBlockChain(address string) *BlockChain {
-	if DBexists() {
+	if utils.DBexists(dbFile) {
 		fmt.Println("Blockchain already exists")
 		runtime.Goexit()
 	}
@@ -81,7 +68,7 @@ func InitBlockChain(address string) *BlockChain {
 	opts.ValueDir = dbPath
 
 	db, err := badger.Open(opts)
-	Handle(err)
+	utils.Handle(err)
 
 	err = db.Update(func(txn *badger.Txn) error {
 		// 创世交易（挖矿奖励）
@@ -94,7 +81,7 @@ func InitBlockChain(address string) *BlockChain {
 
 		// 存 block
 		err := txn.Set(genesis.Hash, genesis.Serialize())
-		Handle(err)
+		utils.Handle(err)
 
 		// 存链尾指针（lh = last hash）
 		err = txn.Set([]byte("lh"), genesis.Hash)
@@ -104,7 +91,7 @@ func InitBlockChain(address string) *BlockChain {
 		return err
 	})
 
-	Handle(err)
+	utils.Handle(err)
 
 	return &BlockChain{lastHash, db}
 }
@@ -114,7 +101,7 @@ func InitBlockChain(address string) *BlockChain {
 //
 // 核心：从 DB 中读取 "lh"（链尾 hash）
 func ContinueBlockChain(address string) *BlockChain {
-	if !DBexists() {
+	if !utils.DBexists(dbFile) {
 		fmt.Println("No existing blockchain found, create one first")
 		runtime.Goexit()
 	}
@@ -126,11 +113,11 @@ func ContinueBlockChain(address string) *BlockChain {
 	opts.ValueDir = dbPath
 
 	db, err := badger.Open(opts)
-	Handle(err)
+	utils.Handle(err)
 
 	err = db.Update(func(txn *badger.Txn) error {
 		item, err := txn.Get([]byte("lh"))
-		Handle(err)
+		utils.Handle(err)
 
 		return item.Value(func(val []byte) error {
 			lastHash = val
@@ -138,7 +125,7 @@ func ContinueBlockChain(address string) *BlockChain {
 		})
 	})
 
-	Handle(err)
+	utils.Handle(err)
 
 	return &BlockChain{lastHash, db}
 }
@@ -170,7 +157,7 @@ func (chain *BlockChain) AddBlock(transactions []*Transaction) {
 			return nil
 		})
 	})
-	Handle(err)
+	utils.Handle(err)
 
 	// 创建新区块
 	newBlock := CreateBlock(transactions, lastHash)
@@ -191,7 +178,7 @@ func (chain *BlockChain) AddBlock(transactions []*Transaction) {
 		return nil
 	})
 
-	Handle(err)
+	utils.Handle(err)
 }
 
 // ========================
@@ -222,7 +209,7 @@ func (iter *BlockChainIterator) Next() *Block {
 			return nil
 		})
 	})
-	Handle(err)
+	utils.Handle(err)
 
 	// 指向前一个区块
 	iter.CurrentHash = block.PrevHash
