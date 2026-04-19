@@ -1,3 +1,4 @@
+// 验证block 是pow
 package blockchain
 
 import (
