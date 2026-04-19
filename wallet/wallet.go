@@ -149,8 +149,8 @@ func (w *Wallet) Address() []byte {
 	/////////////////////////////////////////////////////////////////
 	// 🧪 Debug 输出（开发阶段用）
 	/////////////////////////////////////////////////////////////////
-	fmt.Printf("pub key: %x\n", w.PublicKey)
-	fmt.Printf("pub hash: %x\n", pubHash)
+	// fmt.Printf("pub key: %x\n", w.PublicKey)
+	// fmt.Printf("pub hash: %x\n", pubHash)
 	fmt.Printf("address: %s\n", address)
 
 	return address
