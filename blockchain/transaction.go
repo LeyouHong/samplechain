@@ -18,26 +18,24 @@ import (
 )
 
 /////////////////////////////////////////////////////////////////
-// 🧠 核心背景（必须理解）
+// 🧠 区块链核心概念
 //
-// Transaction = 状态转移
+// Transaction（交易）= 状态转移
 //
-// 在 UTXO 模型中：
-// 一笔交易 = 消耗旧的 UTXO + 生成新的 UTXO
-//
-// Inputs  → 花谁的钱
-// Outputs → 钱给谁
+// UTXO 模型：
+// - Input  = 花掉以前的钱（引用旧 UTXO）
+// - Output = 生成新的钱（新的 UTXO）
 /////////////////////////////////////////////////////////////////
 
-// Transaction 表示一笔交易
+// Transaction 一笔交易结构
 type Transaction struct {
-	ID      []byte     // 🧾 交易唯一 ID（hash）
-	Inputs  []TXInput  // 💸 输入（引用旧的 UTXO）
-	Outputs []TXOutput // 💰 输出（生成新的 UTXO）
+	ID      []byte     // 🔑 交易 hash（唯一 ID）
+	Inputs  []TXInput  // 💸 花的钱（引用 UTXO）
+	Outputs []TXOutput // 💰 新的钱（生成 UTXO）
 }
 
 /////////////////////////////////////////////////////////////////
-// 🧱 序列化（用于 hash / 存储）
+// 🧾 序列化（用于 hash / 存储）
 /////////////////////////////////////////////////////////////////
 
 func (tx Transaction) Serialize() []byte {
@@ -51,16 +49,16 @@ func (tx Transaction) Serialize() []byte {
 }
 
 /////////////////////////////////////////////////////////////////
-// 🔑 计算交易 hash（ID）
+// 🔑 计算交易 Hash（交易 ID）
 //
-// ⚠️ 注意：必须先清空 ID 再 hash（否则递归）
+// ⚠️ 必须先清空 ID，否则 hash 会自引用
 /////////////////////////////////////////////////////////////////
 
 func (tx *Transaction) Hash() []byte {
 	var hash [32]byte
 
 	txCopy := *tx
-	txCopy.ID = []byte{} // ❗ 避免 hash 包含自身 ID
+	txCopy.ID = []byte{} // ❗ 防止递归 hash
 
 	hash = sha256.Sum256(txCopy.Serialize())
 
@@ -86,16 +84,17 @@ func (tx *Transaction) setID() {
 // ⛏️ Coinbase 交易（挖矿奖励）
 //
 // 特点：
-// - 没有真实输入
-// - 凭空产生币
+// - 没有 input
+// - 系统发钱
 /////////////////////////////////////////////////////////////////
 
 func CoinBaseTx(to string, data string) *Transaction {
+
 	if data == "" {
 		data = fmt.Sprintf("Reward to '%s'", to)
 	}
 
-	// Coinbase 特殊 input
+	// 特殊 input（没有真实来源）
 	txIn := TXInput{
 		ID:        []byte{},
 		Out:       -1,
@@ -103,7 +102,7 @@ func CoinBaseTx(to string, data string) *Transaction {
 		PubKey:    []byte(data),
 	}
 
-	// 奖励 100
+	// 固定奖励
 	txOut := NewTXOutput(100, to)
 
 	tx := Transaction{
@@ -118,16 +117,10 @@ func CoinBaseTx(to string, data string) *Transaction {
 }
 
 /////////////////////////////////////////////////////////////////
-// 💸 创建普通交易（核心逻辑）
-//
-// 流程：
-// 1️⃣ 找 UTXO
-// 2️⃣ 构造 inputs
-// 3️⃣ 构造 outputs
-// 4️⃣ 签名
+// 💸 普通转账交易（核心逻辑）
 /////////////////////////////////////////////////////////////////
 
-func NewTransaction(from, to string, amount int, chain *BlockChain) *Transaction {
+func NewTransaction(from, to string, amount int, UTXO *UTXOSet) *Transaction {
 
 	var inputs []TXInput
 	var outputs []TXOutput
@@ -138,17 +131,17 @@ func NewTransaction(from, to string, amount int, chain *BlockChain) *Transaction
 
 	w := wallets.GetWallet(from)
 
-	// 计算发送者 pubKeyHash
+	// sender pubKeyHash（用于找 UTXO）
 	pubKeyHash := wallet.PublicKeyHash(w.PublicKey)
 
-	// 2️⃣ 找可用 UTXO
-	acc, validOutputs := chain.FindSpendableOutputs(pubKeyHash, amount)
+	// 2️⃣ 查 UTXO（找够钱）
+	acc, validOutputs := UTXO.FindSpendableOutputs(pubKeyHash, amount)
 
 	if acc < amount {
 		log.Panic("ERROR: Not enough funds")
 	}
 
-	// 3️⃣ 构造 Inputs（引用旧钱）
+	// 3️⃣ 构造 Inputs（花掉旧 UTXO）
 	for txid, outs := range validOutputs {
 
 		txID, err := hex.DecodeString(txid)
@@ -158,13 +151,13 @@ func NewTransaction(from, to string, amount int, chain *BlockChain) *Transaction
 			input := TXInput{
 				ID:     txID,
 				Out:    out,
-				PubKey: w.PublicKey, // 🔑 解锁用
+				PubKey: w.PublicKey, // 🔑 用于验证 ownership
 			}
 			inputs = append(inputs, input)
 		}
 	}
 
-	// 4️⃣ 构造 Outputs（新钱）
+	// 4️⃣ 构造 Outputs（生成新 UTXO）
 	outputs = append(outputs, *NewTXOutput(amount, to))
 
 	// 找零
@@ -174,17 +167,18 @@ func NewTransaction(from, to string, amount int, chain *BlockChain) *Transaction
 
 	tx := Transaction{nil, inputs, outputs}
 
+	// 5️⃣ 生成 tx hash
 	tx.ID = tx.Hash()
 
-	// 5️⃣ 签名
+	// 6️⃣ 签名交易（防止伪造）
 	privKey := wallet.BytesToPrivateKey(w.PrivateKey)
-	chain.SignTransaction(&tx, *privKey)
+	UTXO.Blockchain.SignTransaction(&tx, *privKey)
 
 	return &tx
 }
 
 /////////////////////////////////////////////////////////////////
-// 🔍 判断是否是 coinbase
+// 🔍 判断 coinbase
 /////////////////////////////////////////////////////////////////
 
 func (tx *Transaction) IsCoinBase() bool {
@@ -194,10 +188,7 @@ func (tx *Transaction) IsCoinBase() bool {
 }
 
 /////////////////////////////////////////////////////////////////
-// ✍️ 签名交易（核心安全逻辑）
-//
-// 思路：
-// 每个 input 都要签名
+// ✍️ 签名（核心安全机制）
 /////////////////////////////////////////////////////////////////
 
 func (tx *Transaction) Sign(privKey ecdsa.PrivateKey, prevTXs map[string]Transaction) {
@@ -206,7 +197,7 @@ func (tx *Transaction) Sign(privKey ecdsa.PrivateKey, prevTXs map[string]Transac
 		return
 	}
 
-	// 确保引用的交易存在
+	// 校验 prev tx 是否存在
 	for _, in := range tx.Inputs {
 		if prevTXs[hex.EncodeToString(in.ID)].ID == nil {
 			log.Panic("ERROR: Previous transaction not found")
@@ -219,7 +210,7 @@ func (tx *Transaction) Sign(privKey ecdsa.PrivateKey, prevTXs map[string]Transac
 
 		prevTX := prevTXs[hex.EncodeToString(in.ID)]
 
-		// 用锁定脚本替换 pubkey
+		// 临时替换 pubkey（用于 hash）
 		txCopy.Inputs[inIdx].Signature = nil
 		txCopy.Inputs[inIdx].PubKey = prevTX.Outputs[in.Out].PubKeyHash
 
@@ -227,7 +218,7 @@ func (tx *Transaction) Sign(privKey ecdsa.PrivateKey, prevTXs map[string]Transac
 
 		txCopy.Inputs[inIdx].PubKey = nil
 
-		// 🔑 用私钥签名
+		// 🔑 ECDSA 签名
 		r, s, err := ecdsa.Sign(rand.Reader, &privKey, txCopy.ID)
 		utils.Handle(err)
 
@@ -238,10 +229,11 @@ func (tx *Transaction) Sign(privKey ecdsa.PrivateKey, prevTXs map[string]Transac
 }
 
 /////////////////////////////////////////////////////////////////
-// ✂️ 生成签名用的副本（去掉签名）
+// ✂️ 生成签名用副本（去掉 signature）
 /////////////////////////////////////////////////////////////////
 
 func (tx *Transaction) TrimmedCopy() Transaction {
+
 	var inputs []TXInput
 	var outputs []TXOutput
 
@@ -249,7 +241,7 @@ func (tx *Transaction) TrimmedCopy() Transaction {
 		inputs = append(inputs, TXInput{
 			in.ID,
 			in.Out,
-			nil, // ❗ 去掉签名
+			nil, // ❗ 清除签名
 			nil,
 		})
 	}
@@ -265,9 +257,7 @@ func (tx *Transaction) TrimmedCopy() Transaction {
 }
 
 /////////////////////////////////////////////////////////////////
-// 🔍 验证交易签名（共识核心）
-//
-// 节点会执行这个函数！
+// 🔍 验证交易（节点执行）
 /////////////////////////////////////////////////////////////////
 
 func (tx *Transaction) Verify(prevTXs map[string]Transaction) bool {
@@ -291,6 +281,7 @@ func (tx *Transaction) Verify(prevTXs map[string]Transaction) bool {
 
 		txCopy.Inputs[inIdx].Signature = nil
 		txCopy.Inputs[inIdx].PubKey = prevTX.Outputs[in.Out].PubKeyHash
+
 		txCopy.ID = txCopy.Hash()
 		txCopy.Inputs[inIdx].PubKey = nil
 
@@ -310,9 +301,9 @@ func (tx *Transaction) Verify(prevTXs map[string]Transaction) bool {
 		x.SetBytes(in.PubKey[:keyLen/2])
 		y.SetBytes(in.PubKey[keyLen/2:])
 
-		rawPubKey := ecdsa.PublicKey{curve, &x, &y}
+		pubKey := ecdsa.PublicKey{curve, &x, &y}
 
-		if !ecdsa.Verify(&rawPubKey, txCopy.ID, &r, &s) {
+		if !ecdsa.Verify(&pubKey, txCopy.ID, &r, &s) {
 			return false
 		}
 	}
@@ -321,26 +312,27 @@ func (tx *Transaction) Verify(prevTXs map[string]Transaction) bool {
 }
 
 /////////////////////////////////////////////////////////////////
-// 🖨️ 打印交易（调试用）
+// 🖨️ 调试输出
 /////////////////////////////////////////////////////////////////
 
 func (tx *Transaction) String() string {
+
 	var lines []string
 
 	lines = append(lines, fmt.Sprintf("--- Transaction %x:", tx.ID))
 
 	for i, input := range tx.Inputs {
-		lines = append(lines, fmt.Sprintf("     Input %d:", i))
-		lines = append(lines, fmt.Sprintf("       TXID: %x", input.ID))
-		lines = append(lines, fmt.Sprintf("       Out: %d", input.Out))
-		lines = append(lines, fmt.Sprintf("       Signature: %x", input.Signature))
-		lines = append(lines, fmt.Sprintf("       PubKey: %x", input.PubKey))
+		lines = append(lines, fmt.Sprintf("Input %d:", i))
+		lines = append(lines, fmt.Sprintf("  TXID: %x", input.ID))
+		lines = append(lines, fmt.Sprintf("  Out: %d", input.Out))
+		lines = append(lines, fmt.Sprintf("  Signature: %x", input.Signature))
+		lines = append(lines, fmt.Sprintf("  PubKey: %x", input.PubKey))
 	}
 
 	for i, output := range tx.Outputs {
-		lines = append(lines, fmt.Sprintf("     Output %d:", i))
-		lines = append(lines, fmt.Sprintf("       Value: %d", output.Value))
-		lines = append(lines, fmt.Sprintf("       PubKeyHash: %x", output.PubKeyHash))
+		lines = append(lines, fmt.Sprintf("Output %d:", i))
+		lines = append(lines, fmt.Sprintf("  Value: %d", output.Value))
+		lines = append(lines, fmt.Sprintf("  PubKeyHash: %x", output.PubKeyHash))
 	}
 
 	return strings.Join(lines, "\n")

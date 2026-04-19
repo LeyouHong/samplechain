@@ -3,7 +3,6 @@ package wallet
 import (
 	"bytes"
 	"encoding/gob"
-	"fmt"
 	"os"
 
 	"github.com/LeyouHong/samplechain/utils"
@@ -81,6 +80,4 @@ func (ws *Wallets) SaveFile() {
 
 	err = os.WriteFile(walletFile, content.Bytes(), 0644)
 	utils.Handle(err)
-
-	fmt.Println("Wallet saved successfully")
 }

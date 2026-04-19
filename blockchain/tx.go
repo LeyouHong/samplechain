@@ -2,7 +2,9 @@ package blockchain
 
 import (
 	"bytes"
+	"encoding/gob"
 
+	"github.com/LeyouHong/samplechain/utils"
 	"github.com/LeyouHong/samplechain/wallet"
 )
 
@@ -31,6 +33,10 @@ type TXOutput struct {
 	// 只有拥有对应私钥的人才能花这笔钱
 	// 实际存的是：公钥的 hash（不是地址字符串）
 	PubKeyHash []byte
+}
+
+type TxOutputs struct {
+	Outputs []TXOutput
 }
 
 /////////////////////////////////////////////////////////////////
@@ -71,6 +77,26 @@ func NewTXOutput(value int, address string) *TXOutput {
 	txo.Lock([]byte(address))
 
 	return txo
+}
+
+func (outs TxOutputs) Serialize() []byte {
+	var buff bytes.Buffer
+
+	enc := gob.NewEncoder(&buff)
+	err := enc.Encode(outs)
+	utils.Handle(err)
+
+	return buff.Bytes()
+}
+
+func DeserializeOutputs(data []byte) TxOutputs {
+	var outputs TxOutputs
+
+	dec := gob.NewDecoder(bytes.NewReader(data))
+	err := dec.Decode(&outputs)
+	utils.Handle(err)
+
+	return outputs
 }
 
 /////////////////////////////////////////////////////////////////

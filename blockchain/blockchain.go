@@ -13,12 +13,12 @@ import (
 )
 
 // ========================
-// 数据库相关常量
+// 数据库存储相关路径
 // ========================
 
-// dbPath: 区块数据存储目录
-// dbFile: 用于判断 DB 是否存在（Badger 会生成 MANIFEST 文件）
-// genesisData: 创世区块默认数据
+// dbPath  : Badger DB 数据目录（存 block + utxo）
+// dbFile  : 用来判断 DB 是否存在（MANIFEST 是 Badger 标志文件）
+// genesisData : 创世区块默认信息（第一笔交易）
 const (
 	dbPath      = "./tmp/blocks"
 	dbFile      = "./tmp/blocks/MANIFEST"
@@ -26,39 +26,32 @@ const (
 )
 
 // ========================
-// 核心结构定义
+// 区块链结构
 // ========================
 
-// BlockChain 表示整条链
-// LastHash：当前链尾区块 hash（快速定位最新区块）
-// Database：底层 KV 存储（BadgerDB）
+// BlockChain = 一条链 + 一个数据库
+// LastHash   : 当前链尾 block hash（快速定位最新 block）
+// Database   : Badger KV 存储（key-value = hash -> block）
 type BlockChain struct {
 	LastHash []byte
 	Database *badger.DB
 }
 
-// BlockChainIterator 用于遍历区块链（从尾到头）
-// CurrentHash：当前指向的区块
+// BlockChainIterator
+// 用于从“最新 block → genesis block”遍历
 type BlockChainIterator struct {
 	CurrentHash []byte
 	Database    *badger.DB
 }
 
 // ========================
-// 初始化 & 加载区块链
+// 创建 / 加载链
 // ========================
 
-// InitBlockChain
-// 初始化区块链（只允许第一次创建）
-//
-// 流程：
-// 1. 如果 DB 已存在 → 直接退出
-// 2. 创建 coinbase 交易
-// 3. 创建创世区块
-// 4. 存入 DB：
-//   - key = block hash → value = block data
-//   - key = "lh" → value = latest hash
+// InitBlockChain：第一次创建链（必须是空的）
 func InitBlockChain(address string) *BlockChain {
+
+	// 如果 DB 已存在 → 禁止重复创建
 	if utils.DBexists(dbFile) {
 		fmt.Println("Blockchain already exists")
 		runtime.Goexit()
@@ -66,27 +59,31 @@ func InitBlockChain(address string) *BlockChain {
 
 	var lastHash []byte
 
+	// 打开 Badger DB
 	opts := badger.DefaultOptions(dbPath)
 	opts.Dir = dbPath
 	opts.ValueDir = dbPath
+	opts.Logger = nil // 关闭 Badger 日志输出
 
 	db, err := badger.Open(opts)
 	utils.Handle(err)
 
+	// 写入创世区块
 	err = db.Update(func(txn *badger.Txn) error {
-		// 创世交易（挖矿奖励）
+
+		// 1. 创建 coinbase 交易（挖矿奖励）
 		cbtx := CoinBaseTx(address, genesisData)
 
-		// 创世区块
+		// 2. 创建 genesis block
 		genesis := Genesis(cbtx)
 
 		fmt.Println("Genesis created")
 
-		// 存 block
+		// 3. 存 block: key = hash, value = serialized block
 		err := txn.Set(genesis.Hash, genesis.Serialize())
 		utils.Handle(err)
 
-		// 存链尾指针（lh = last hash）
+		// 4. 存链尾指针
 		err = txn.Set([]byte("lh"), genesis.Hash)
 
 		lastHash = genesis.Hash
@@ -99,11 +96,10 @@ func InitBlockChain(address string) *BlockChain {
 	return &BlockChain{lastHash, db}
 }
 
-// ContinueBlockChain
-// 加载已有区块链
-//
-// 核心：从 DB 中读取 "lh"（链尾 hash）
+// ContinueBlockChain：加载已有链
 func ContinueBlockChain(address string) *BlockChain {
+
+	// DB 不存在就不能加载
 	if !utils.DBexists(dbFile) {
 		fmt.Println("No existing blockchain found, create one first")
 		runtime.Goexit()
@@ -114,10 +110,12 @@ func ContinueBlockChain(address string) *BlockChain {
 	opts := badger.DefaultOptions(dbPath)
 	opts.Dir = dbPath
 	opts.ValueDir = dbPath
+	opts.Logger = nil // 关闭 Badger 日志输出
 
 	db, err := badger.Open(opts)
 	utils.Handle(err)
 
+	// 从 DB 读取 "lh"（last hash）
 	err = db.Update(func(txn *badger.Txn) error {
 		item, err := txn.Get([]byte("lh"))
 		utils.Handle(err)
@@ -134,21 +132,16 @@ func ContinueBlockChain(address string) *BlockChain {
 }
 
 // ========================
-// 区块操作
+// 添加新区块
 // ========================
 
-// AddBlock
-// 向链尾添加新区块
-//
-// 流程：
-// 1. 读取当前链尾 hash
-// 2. 创建新区块
-// 3. 写入 DB
-// 4. 更新链尾指针
-func (chain *BlockChain) AddBlock(transactions []*Transaction) {
+// AddBlock:
+// 把交易打包进 block 并追加到链尾
+func (chain *BlockChain) AddBlock(transactions []*Transaction) *Block {
+
 	var lastHash []byte
 
-	// 读链尾
+	// 1. 读取当前链尾 hash
 	err := chain.Database.View(func(txn *badger.Txn) error {
 		item, err := txn.Get([]byte("lh"))
 		if err != nil {
@@ -162,17 +155,18 @@ func (chain *BlockChain) AddBlock(transactions []*Transaction) {
 	})
 	utils.Handle(err)
 
-	// 创建新区块
+	// 2. 创建新 block（指向旧链尾）
 	newBlock := CreateBlock(transactions, lastHash)
 
-	// 写入 DB
+	// 3. 写入 DB + 更新链尾
 	err = chain.Database.Update(func(txn *badger.Txn) error {
-		// 存 block 数据
+
+		// 存 block
 		if err := txn.Set(newBlock.Hash, newBlock.Serialize()); err != nil {
 			return err
 		}
 
-		// 更新链尾
+		// 更新 last hash
 		if err := txn.Set([]byte("lh"), newBlock.Hash); err != nil {
 			return err
 		}
@@ -182,23 +176,22 @@ func (chain *BlockChain) AddBlock(transactions []*Transaction) {
 	})
 
 	utils.Handle(err)
+
+	return newBlock
 }
 
 // ========================
-// 迭代器
+// 链遍历（核心：反向链）
 // ========================
 
-// Iterator 返回一个从链尾开始的迭代器
+// Iterator：从最新 block 开始遍历
 func (chain *BlockChain) Iterator() *BlockChainIterator {
 	return &BlockChainIterator{chain.LastHash, chain.Database}
 }
 
-// Next
-// 返回当前区块，并移动到前一个区块
-//
-// 本质：
-// current → prev → prev → ...
+// Next：取当前 block，并移动到 prev block
 func (iter *BlockChainIterator) Next() *Block {
+
 	var block *Block
 
 	err := iter.Database.View(func(txn *badger.Txn) error {
@@ -214,129 +207,82 @@ func (iter *BlockChainIterator) Next() *Block {
 	})
 	utils.Handle(err)
 
-	// 指向前一个区块
+	// 指向前一个 block（链的关键）
 	iter.CurrentHash = block.PrevHash
 
 	return block
 }
 
 // ========================
-// UTXO 相关逻辑（重点）
+// UTXO 查找（核心逻辑）
 // ========================
 
-// FindUnspentTransactions
-// 查找 address 所有“未花费交易”
-//
-// 核心思想：
-// 1. 从链尾往前扫
-// 2. 记录已花费的 output
-// 3. 剩下的就是 UTXO
-func (chain *BlockChain) FindUnspentTransactions(pubKeyHash []byte) []Transaction {
-	var unspentTXs []Transaction
+// FindUTXO:
+// 找所有“未花费输出”
+func (chain *BlockChain) FindUTXO() map[string]TxOutputs {
 
-	// key: txID → value: 已花费的 output index
-	spentTXOs := make(map[string][]int)
+	UTXOs := make(map[string]TxOutputs)
+
+	// 记录已经被花费的 output
+	spendTXOs := make(map[string][]int)
 
 	iter := chain.Iterator()
 
 	for {
+
 		block := iter.Next()
 
 		for _, tx := range block.Transactions {
+
 			txID := hex.EncodeToString(tx.ID)
 
 		Outputs:
 			for outIdx, out := range tx.Outputs {
 
-				// 如果这个 output 已经被花费 → 跳过
-				if spentTXOs[txID] != nil {
-					for _, spentOut := range spentTXOs[txID] {
+				// 如果这个 output 已经被花掉 → 跳过
+				if spendTXOs[txID] != nil {
+					for _, spentOut := range spendTXOs[txID] {
 						if spentOut == outIdx {
 							continue Outputs
 						}
 					}
 				}
 
-				// 属于当前 address → 加入未花费列表
-				if out.IsLockedWithKey(pubKeyHash) {
-					unspentTXs = append(unspentTXs, *tx)
-				}
+				// 收集未花费 output
+				outs := UTXOs[txID]
+				outs.Outputs = append(outs.Outputs, out)
+				UTXOs[txID] = outs
 			}
 
-			// 非 coinbase 才有 input
+			// 记录 inputs（标记已花费 output）
 			if !tx.IsCoinBase() {
 				for _, in := range tx.Inputs {
-					if in.UsesKey(pubKeyHash) {
-						inTxID := hex.EncodeToString(in.ID)
-						spentTXOs[inTxID] = append(spentTXOs[inTxID], in.Out)
-					}
+					inTxID := hex.EncodeToString(in.ID)
+					spendTXOs[inTxID] = append(spendTXOs[inTxID], in.Out)
 				}
 			}
 		}
 
-		// 到创世区块结束
+		// 到 genesis block 停止
 		if len(block.PrevHash) == 0 {
 			break
-		}
-	}
-
-	return unspentTXs
-}
-
-// FindUTXO
-// 从未花费交易中提取所有属于 address 的 output
-func (chain *BlockChain) FindUTXO(pubKeyHash []byte) []TXOutput {
-	var UTXOs []TXOutput
-
-	unspentTransactions := chain.FindUnspentTransactions(pubKeyHash)
-
-	for _, tx := range unspentTransactions {
-		for _, out := range tx.Outputs {
-			if out.IsLockedWithKey(pubKeyHash) {
-				UTXOs = append(UTXOs, out)
-			}
 		}
 	}
 
 	return UTXOs
 }
 
-// FindSpendableOutputs
-// 找到足够支付 amount 的 UTXO
-//
-// 返回：
-// accumulated：累计金额
-// map[txID][]outIdx：可用输出
-func (chain *BlockChain) FindSpendableOutputs(pubKeyHash []byte, amount int) (int, map[string][]int) {
+// ========================
+// 交易查找
+// ========================
 
-	unspentOutputs := make(map[string][]int)
-	unspentTXs := chain.FindUnspentTransactions(pubKeyHash)
-
-	accumulated := 0
-
-Work:
-	for _, tx := range unspentTXs {
-		txID := hex.EncodeToString(tx.ID)
-
-		for outIdx, out := range tx.Outputs {
-			if out.IsLockedWithKey(pubKeyHash) && accumulated < amount {
-				accumulated += out.Value
-				unspentOutputs[txID] = append(unspentOutputs[txID], outIdx)
-
-				if accumulated >= amount {
-					break Work
-				}
-			}
-		}
-	}
-
-	return accumulated, unspentOutputs
-}
-
+// FindTransaction: 在整条链中找某个 tx
 func (chain *BlockChain) FindTransaction(ID []byte) (Transaction, error) {
+
 	iter := chain.Iterator()
 
 	for {
+
 		block := iter.Next()
 
 		for _, tx := range block.Transactions {
@@ -353,9 +299,17 @@ func (chain *BlockChain) FindTransaction(ID []byte) (Transaction, error) {
 	return Transaction{}, errors.New("Transaction is not found")
 }
 
+// ========================
+// 签名 / 验证（核心密码学）
+// ========================
+
+// SignTransaction:
+// 用私钥对 transaction 签名
 func (chain *BlockChain) SignTransaction(tx *Transaction, privKey ecdsa.PrivateKey) {
+
 	prevTXs := make(map[string]Transaction)
 
+	// 找所有 input 对应的 previous tx
 	for _, in := range tx.Inputs {
 		prevTX, err := chain.FindTransaction(in.ID)
 		utils.Handle(err)
@@ -365,7 +319,10 @@ func (chain *BlockChain) SignTransaction(tx *Transaction, privKey ecdsa.PrivateK
 	tx.Sign(privKey, prevTXs)
 }
 
+// VerifyTransaction:
+// 验证签名是否合法
 func (chain *BlockChain) VerifyTransaction(tx *Transaction) bool {
+
 	prevTXs := make(map[string]Transaction)
 
 	for _, in := range tx.Inputs {
