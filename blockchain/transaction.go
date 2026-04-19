@@ -71,12 +71,13 @@ func (tx *Transaction) Hash() []byte {
 
 func (tx *Transaction) setID() {
 	var encoded bytes.Buffer
+	var hash [32]byte
 
 	encoder := gob.NewEncoder(&encoded)
 	err := encoder.Encode(tx)
 	utils.Handle(err)
 
-	hash := sha256.Sum256(encoded.Bytes())
+	hash = sha256.Sum256(encoded.Bytes())
 	tx.ID = hash[:]
 }
 
@@ -91,7 +92,11 @@ func (tx *Transaction) setID() {
 func CoinBaseTx(to string, data string) *Transaction {
 
 	if data == "" {
-		data = fmt.Sprintf("Reward to '%s'", to)
+		randomData := make([]byte, 24)
+		_, err := rand.Read(randomData)
+		utils.Handle(err)
+
+		data = fmt.Sprintf("%x", randomData)
 	}
 
 	// 特殊 input（没有真实来源）
@@ -103,13 +108,15 @@ func CoinBaseTx(to string, data string) *Transaction {
 	}
 
 	// 固定奖励
-	txOut := NewTXOutput(100, to)
+	txOut := NewTXOutput(20, to)
 
 	tx := Transaction{
 		nil,
 		[]TXInput{txIn},
 		[]TXOutput{*txOut},
 	}
+
+	tx.ID = tx.Hash() // 生成交易 ID
 
 	tx.setID()
 

@@ -323,6 +323,11 @@ func (chain *BlockChain) SignTransaction(tx *Transaction, privKey ecdsa.PrivateK
 // 验证签名是否合法
 func (chain *BlockChain) VerifyTransaction(tx *Transaction) bool {
 
+	// coinbase tx 无需验证
+	if tx.IsCoinBase() {
+		return true
+	}
+
 	prevTXs := make(map[string]Transaction)
 
 	for _, in := range tx.Inputs {

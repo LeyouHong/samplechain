@@ -17,6 +17,7 @@ This project implements a simplified Bitcoin-like blockchain system including:
 - Persistent storage (BadgerDB)
 - Chain traversal
 - UTXO indexing system
+- Merkle Tree
 
 ---
 
@@ -27,6 +28,7 @@ This project implements a simplified Bitcoin-like blockchain system including:
 - **Wallet layer**: Key generation, address creation
 - **Storage layer**: BadgerDB persistence
 - **UTXO layer**: spend tracking & indexing
+- **Merkle Tree**: Transaction hashing tree for efficient inclusion proof
 
 ---
 
@@ -88,20 +90,20 @@ This project implements a simplified Bitcoin-like blockchain system including:
 
 ---
 
+### Merkle Tree
+
+- Transaction hashing for inclusion proof
+- Build Merkle root for each block
+- Verify transaction integrity efficiently
+
+---
+
 ## 📡 Blockchain Commands
 
 ### 🧾 Create blockchain
 
 ```bash
-go run main.go createblockchain <address>
-```
-
----
-
-### ➕ Add block
-
-```bash
-go run main.go addblock
+go run main.go createblockchain -address <ADDRESS>
 ```
 
 ---
@@ -109,7 +111,7 @@ go run main.go addblock
 ### 💸 Send transaction
 
 ```bash
-go run main.go send <from> <to> <amount>
+go run main.go send -from <FROM> -to <TO> -amount <AMOUNT>
 ```
 
 ---
@@ -125,84 +127,39 @@ go run main.go printchain
 ### 🧮 Rebuild UTXO index
 
 ```bash
-go run main.go reindex
+go run main.go reindexutxo
 ```
 
 ---
 
-## 📊 Core APIs
+### 🔍 Get Balance
 
-### Blockchain
-
-- InitBlockChain(address string)
-- ContinueBlockChain(address string)
-- AddBlock(transactions)
-- Iterator()
-- FindTransaction(ID)
-- SignTransaction(tx, privKey)
-- VerifyTransaction(tx)
+```bash
+go run main.go getbalance -address <ADDRESS>
+```
 
 ---
 
-### Transaction
+### 🧾 Create wallet
 
-- NewTransaction(from, to, amount, chain)
-- CoinBaseTx(to, data)
-- Hash()
-- Serialize()
-- Sign()
-- Verify()
-- TrimmedCopy()
-- IsCoinBase()
+```bash
+go run main.go createwallet
+```
 
 ---
 
-### Wallet
+### 🔍 List Address
 
-- MakeWallet()
-- NewKeyPair()
-- Address()
-- PublicKeyHash()
-- ValidateAddress()
-- BytesToPrivateKey()
+```bash
+go run main.go listaddresses
+```
 
 ---
 
-### UTXO Set
+### 🔍 Dump DB
 
-- FindSpendableOutputs()
-- FindUTXO()
-- Update(block)
-- Reindex()
-- DeleteByPrefix()
+```bash
+go run main.go dumpdb
+```
 
 ---
-
-## 🧠 Design Notes
-
-- UTXO model (Bitcoin-style)
-- ECDSA (P256) for signatures
-- Hash160: SHA256 + RIPEMD160
-- Base58Check address format
-- BadgerDB for persistence
-
----
-
-## ⚠️ Current Limitations
-
-- No P2P networking
-- No mempool
-- No smart contract VM
-- Simplified signature format
-- Single-node execution
-
----
-
-## 🚀 Future Work
-
-- P2P networking layer
-- Merkle Tree integration
-- Smart contract VM (WASM or stack-based)
-- Mempool system
-- Fee mechanism
-- Multi-node consensus simulation
