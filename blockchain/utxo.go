@@ -1,3 +1,20 @@
+// 两条路径：
+// 🟢 A. Reindex（全量重建）
+// Blockchain → FindUTXO() → DB(UTXO)
+
+// ✔ 不依赖 DB 旧状态
+// ✔ 纯计算历史
+
+// 🔵 B. Update（增量维护）
+// 旧UTXO(DB)
+//    ↓
+// 删 inputs（spent）
+//    ↓
+// 加 outputs（new UTXO）
+
+// ✔ 依赖 DB 当前状态
+// ✔ 只处理新 block
+
 package blockchain
 
 import (
@@ -19,6 +36,9 @@ var (
 //
 // 👉 作用：
 // 不再全链扫描，而是直接从 DB 快速查找 UTXO
+// UTXO Set（你现在的）
+// DB 里始终维护：
+// 当前所有未花费的输出（UTXO）
 type UTXOSet struct {
 	Blockchain *BlockChain
 }
