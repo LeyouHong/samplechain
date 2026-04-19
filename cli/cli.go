@@ -26,6 +26,12 @@ func (cli *CommandLine) printUsage() {
 	fmt.Println(" createwallet - Create a wallet")
 	fmt.Println(" listaddresses - List all addresses from the wallet file")
 	fmt.Println(" reindexutxo - Reindex the UTXO set")
+	fmt.Println(" dumpdb - Dump the contents of the database")
+}
+
+func (cli *CommandLine) dumpDB() {
+	chain := blockchain.ContinueBlockChain("")
+	chain.DumpDB()
 }
 
 // validateArgs 检查命令行参数数量是否合法
@@ -166,6 +172,7 @@ func (cli *CommandLine) Run() {
 	sendFrom := sendCmd.String("from", "", "Source wallet address")
 	sendTo := sendCmd.String("to", "", "Destination wallet address")
 	sendAmount := sendCmd.Int("amount", 0, "Amount to send")
+	dumpDBCmd := flag.NewFlagSet("dumpdb", flag.ExitOnError)
 
 	switch os.Args[1] {
 	case "reindexutxo":
@@ -189,9 +196,16 @@ func (cli *CommandLine) Run() {
 	case "printchain":
 		err := printChainCmd.Parse(os.Args[2:])
 		utils.Handle(err)
+	case "dumpdb":
+		err := dumpDBCmd.Parse(os.Args[2:])
+		utils.Handle(err)
 	default:
 		cli.printUsage()
 		runtime.Goexit()
+	}
+
+	if dumpDBCmd.Parsed() {
+		cli.dumpDB()
 	}
 
 	if getBalanceCmd.Parsed() {
