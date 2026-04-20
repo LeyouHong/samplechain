@@ -426,6 +426,7 @@ func HandleVersion(request []byte, chain *blockchain.BlockChain) {
 
 	if !NodeIsKnown(payload.AddrFrom) {
 		KnownNodes = append(KnownNodes, payload.AddrFrom)
+		fmt.Printf("Added new node: %s, known nodes: %v\n", payload.AddrFrom, KnownNodes)
 	}
 }
 

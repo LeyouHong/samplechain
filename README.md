@@ -1,165 +1,114 @@
 # 📦 samplechain
 
-A simplified blockchain implementation in Go.
-
-This project is my foundation for future DApp development.
+A simplified Bitcoin-like blockchain implementation in Go, built as a foundation for future DApp development.
 
 ---
 
 ## 🚀 Overview
 
-This project implements a simplified Bitcoin-like blockchain system including:
+This project implements core blockchain primitives including:
 
-- Block structure + Proof of Work
-- UTXO transaction model
-- Wallet (ECDSA-based)
+- Block structure with Proof of Work (PoW)
+- UTXO-based transaction model
+- ECDSA wallet with Base58Check addresses
 - Transaction signing & verification
-- Persistent storage (BadgerDB)
-- Chain traversal
-- UTXO indexing system
-- Merkle Tree
+- Persistent storage via BadgerDB
+- UTXO indexing with Merkle Tree
+- P2P node networking with block/transaction propagation
 
 ---
 
 ## 🧱 Architecture
 
-- **Blockchain layer**: Block, PoW, chain linking
-- **Transaction layer**: UTXO model
-- **Wallet layer**: Key generation, address creation
-- **Storage layer**: BadgerDB persistence
-- **UTXO layer**: spend tracking & indexing
-- **Merkle Tree**: Transaction hashing tree for efficient inclusion proof
+| Layer       | Components                               |
+| ----------- | ---------------------------------------- |
+| Blockchain  | Block, PoW, chain linking, iterator      |
+| Transaction | UTXO model, coinbase, inputs/outputs     |
+| Wallet      | ECDSA key gen, address creation, signing |
+| Storage     | BadgerDB persistence                     |
+| UTXO Index  | Spend tracking, reindex, update          |
+| Merkle Tree | Transaction hashing for block integrity  |
+| Network     | P2P TCP node, block/tx propagation       |
 
 ---
 
-## 💡 Features
+## 📡 Node Networking
 
-### ⛓ Blockchain Core
+Nodes communicate over TCP using a custom binary protocol. Supported message types:
 
-- Create genesis block
-- Add new blocks
-- Proof of Work (PoW)
-- Block hashing
-- Chain traversal (iterator)
+`version` · `addr` · `getblocks` · `inv` · `getdata` · `block` · `tx`
 
----
-
-### 💸 Transaction System (UTXO Model)
-
-- Create transactions
-- Coinbase (mining reward) transactions
-- Input/Output model
-- UTXO selection (FindSpendableOutputs)
-- Change output handling
-
----
-
-### 🔐 Wallet System
-
-- ECDSA key pair generation
-- Public key hashing (SHA256 + RIPEMD160)
-- Base58Check address generation
-- Private key serialization (x509)
-
----
-
-### ✍️ Digital Signature
-
-- Transaction signing (ECDSA)
-- Per-input signature
-- Signature verification
-- Prev transaction reconstruction
-
----
-
-### 🗂 UTXO System
-
-- UTXO indexing in BadgerDB
-- Find all spendable outputs
-- Reindex full UTXO set
-- Update UTXO after block mining
-
----
-
-### 💾 Persistent Storage (BadgerDB)
-
-- Store blocks by hash
-- Store latest hash pointer
-- Store UTXO set with prefix indexing
-- Block reloading from disk
-
----
-
-### Merkle Tree
-
-- Transaction hashing for inclusion proof
-- Build Merkle root for each block
-- Verify transaction integrity efficiently
-
----
-
-## 📡 Blockchain Commands
-
-### 🧾 Create blockchain
+### Start a node
 
 ```bash
-go run main.go createblockchain -address <ADDRESS>
+# Start the seed node (port 3000)
+NODE_ID=3000 go run main.go startnode
+
+# Start a mining node
+NODE_ID=4000 go run main.go startnode -miner <MINER_ADDRESS>
+
+# Start a regular node
+NODE_ID=5000 go run main.go startnode
+```
+
+Nodes automatically sync with the seed node (`localhost:3000`) on startup and propagate new transactions and blocks across the network.
+
+---
+
+## 💻 CLI Commands
+
+### Create a blockchain
+
+```bash
+NODE_ID=3000 go run main.go createblockchain -address <ADDRESS>
+```
+
+### Create a wallet
+
+```bash
+NODE_ID=3000 go run main.go createwallet
+```
+
+### List addresses
+
+```bash
+NODE_ID=3000 go run main.go listaddresses
+```
+
+### Get balance
+
+```bash
+NODE_ID=3000 go run main.go getbalance -address <ADDRESS>
+```
+
+### Send a transaction
+
+```bash
+# Broadcast to network (requires a running node)
+NODE_ID=3000 go run main.go send -from <FROM> -to <TO> -amount <AMOUNT>
+
+# Mine immediately on this node
+NODE_ID=3000 go run main.go send -from <FROM> -to <TO> -amount <AMOUNT> -mine
+```
+
+### Print the chain
+
+```bash
+NODE_ID=3000 go run main.go printchain
+```
+
+### Rebuild UTXO index
+
+```bash
+NODE_ID=3000 go run main.go reindexutxo
 ```
 
 ---
 
-### 💸 Send transaction
+## 🔧 Tech Stack
 
-```bash
-go run main.go send -from <FROM> -to <TO> -amount <AMOUNT>
-```
-
----
-
-### 🔍 Print blockchain
-
-```bash
-go run main.go printchain
-```
-
----
-
-### 🧮 Rebuild UTXO index
-
-```bash
-go run main.go reindexutxo
-```
-
----
-
-### 🔍 Get Balance
-
-```bash
-go run main.go getbalance -address <ADDRESS>
-```
-
----
-
-### 🧾 Create wallet
-
-```bash
-go run main.go createwallet
-```
-
----
-
-### 🔍 List Address
-
-```bash
-go run main.go listaddresses
-```
-
----
-
-### 🔍 Dump DB
-
-```bash
-go run main.go dumpdb
-```
-
----
+- **Language**: Go
+- **Storage**: [BadgerDB](https://github.com/dgraph-io/badger)
+- **Crypto**: ECDSA (P-256), SHA-256, RIPEMD-160
+- **Encoding**: GOB, Base58Check
+- **Networking**: Raw TCP with custom protocol
