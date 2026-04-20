@@ -3,23 +3,24 @@ package wallet
 import (
 	"bytes"
 	"encoding/gob"
+	"fmt"
 	"os"
 
 	"github.com/LeyouHong/samplechain/utils"
 )
 
-const walletFile = "./tmp/wallets.data"
+const walletFile = "./tmp/wallets_%s.data"
 
 type Wallets struct {
 	Wallets map[string]*Wallet
 }
 
 // 初始化
-func CreateWallets() (*Wallets, error) {
+func CreateWallets(nodeId string) (*Wallets, error) {
 	ws := Wallets{}
 	ws.Wallets = make(map[string]*Wallet)
 
-	err := ws.LoadFile()
+	err := ws.LoadFile(nodeId)
 	return &ws, err
 }
 
@@ -48,15 +49,16 @@ func (ws Wallets) GetWallet(address string) Wallet {
 }
 
 // 加载文件（关键修复）
-func (ws *Wallets) LoadFile() error {
-	if _, err := os.Stat(walletFile); os.IsNotExist(err) {
+func (ws *Wallets) LoadFile(nodeId string) error {
+	path := fmt.Sprintf(walletFile, nodeId)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
 		// ✅ 第一次运行正常
 		return nil
 	}
 
 	var wallets Wallets
 
-	fileContent, err := os.ReadFile(walletFile)
+	fileContent, err := os.ReadFile(path)
 	utils.Handle(err)
 
 	decoder := gob.NewDecoder(bytes.NewReader(fileContent))
@@ -68,7 +70,8 @@ func (ws *Wallets) LoadFile() error {
 }
 
 // 保存文件（关键修复）
-func (ws *Wallets) SaveFile() {
+func (ws *Wallets) SaveFile(nodeId string) {
+	path := fmt.Sprintf(walletFile, nodeId)
 	var content bytes.Buffer
 
 	encoder := gob.NewEncoder(&content)
@@ -78,6 +81,6 @@ func (ws *Wallets) SaveFile() {
 	// ✅ 确保目录存在
 	os.MkdirAll("./tmp", 0755)
 
-	err = os.WriteFile(walletFile, content.Bytes(), 0644)
+	err = os.WriteFile(path, content.Bytes(), 0644)
 	utils.Handle(err)
 }

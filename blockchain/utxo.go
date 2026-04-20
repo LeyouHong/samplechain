@@ -101,7 +101,7 @@ func (u UTXOSet) FindSpendableOutputs(pubKeyHash []byte, amount int) (int, map[s
 // 获取所有 UTXO
 // =========================
 // 用于查询余额
-func (u UTXOSet) FindUTXO(pubKeyHash []byte) []TXOutput {
+func (u UTXOSet) FindUnspentTransactions(pubKeyHash []byte) []TXOutput {
 
 	var UTXOs []TXOutput
 	db := u.Blockchain.Database
