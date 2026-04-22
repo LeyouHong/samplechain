@@ -7,39 +7,52 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/gob"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"math/big"
 	"strings"
 
 	"github.com/LeyouHong/samplechain/utils"
-	"github.com/LeyouHong/samplechain/wallet"
 )
 
-// Transaction 表示区块链上的一笔交易
-// 每笔交易由若干输入（TXInput）和输出（TXOutput）组成，遵循 UTXO 模型
+// 交易类型常量
+const (
+	TxTypeTransfer = 0 // 普通转账
+	TxTypeDeploy   = 1 // 部署合约
+	TxTypeCall     = 2 // 调用合约
+)
+
+// Transaction 表示区块链上的一笔交易（账户模型）
+// 不再有 UTXO 的 Inputs/Outputs，改为直接记录发送方、接收方和金额
 type Transaction struct {
-	ID      []byte     // 交易 ID，即对交易内容进行 SHA256 哈希后的结果
-	Inputs  []TXInput  // 交易输入列表，每个输入引用某笔历史交易的输出（UTXO）
-	Outputs []TXOutput // 交易输出列表，定义本次交易的接收方和金额
+	ID   []byte // 交易哈希，由交易内容计算得出
+	Type int    // 交易类型：Transfer / Deploy / Call
+
+	From     []byte // 发送方地址（Base58 字节），coinbase 交易时为 nil
+	To       []byte // 接收方地址，部署合约时为 nil（地址由链生成）
+	Value    int64  // 转账金额，单位为链的最小货币单位
+	Data     []byte // 附加数据：Deploy 时为合约字节码，Call 时为 ABI 编码调用数据，Transfer 时为空
+	GasLimit uint64 // 愿意消耗的最大 Gas 量
+	Nonce    uint64 // 发送方的交易计数，每发一笔交易 +1，防止重放攻击
+
+	Signature []byte // ECDSA 签名，由 (r, s) 拼接而成，coinbase 交易为 nil
 }
 
-// Hash 计算并返回交易的哈希值，用作交易 ID
-// 计算前将 ID 字段清空，避免循环依赖
+// ─── 哈希与序列化 ────────────────────────────────────────────
+
+// Hash 计算交易的 SHA256 哈希，作为交易 ID
+// 计算时排除 ID 和 Signature 字段，避免循环依赖
 func (tx *Transaction) Hash() []byte {
-	var hash [32]byte
-
 	txCopy := *tx
-	txCopy.ID = []byte{} // 清空 ID 字段，再对其余字段序列化后求哈希
+	txCopy.ID = []byte{}
+	txCopy.Signature = nil
 
-	hash = sha256.Sum256(txCopy.Serialize())
-
+	hash := sha256.Sum256(txCopy.Serialize())
 	return hash[:]
 }
 
-// Serialize 将交易结构体使用 gob 编码序列化为字节切片
-// 用于网络传输和持久化存储
+// Serialize 将交易使用 gob 编码序列化为字节切片
+// 用于持久化存储和网络传输
 func (tx Transaction) Serialize() []byte {
 	var encoded bytes.Buffer
 
@@ -53,7 +66,6 @@ func (tx Transaction) Serialize() []byte {
 }
 
 // DeserializeTransaction 将字节切片反序列化为 Transaction 结构体
-// 用于从数据库读取或从网络接收数据后还原交易
 func DeserializeTransaction(data []byte) Transaction {
 	var transaction Transaction
 
@@ -63,207 +75,152 @@ func DeserializeTransaction(data []byte) Transaction {
 	return transaction
 }
 
-// CoinBaseTx 创建一笔 coinbase 交易（挖矿奖励交易）
-// coinbase 交易没有有效的输入引用，是区块链中凭空产生币的唯一方式
-// to：矿工的钱包地址；data：附加数据，为空时自动生成随机数据防止哈希碰撞
-func CoinBaseTx(to, data string) *Transaction {
-	if data == "" {
-		// 生成 24 字节随机数据作为 coinbase 的附加字段，确保每笔 coinbase 交易的唯一性
-		randData := make([]byte, 24)
-		_, err := rand.Read(randData)
-		utils.Handle(err)
-		data = fmt.Sprintf("%x", randData)
+// ─── 构造交易 ────────────────────────────────────────────────
+
+// CoinBaseTx 创建一笔 coinbase 交易（挖矿奖励）
+// coinbase 交易没有发送方，由链直接向矿工发放固定奖励
+// to：矿工地址（Base58 字节）；data：附加说明，可为空
+func CoinBaseTx(to []byte, data string) *Transaction {
+	tx := &Transaction{
+		Type:     TxTypeTransfer,
+		From:     nil, // coinbase 无发送方
+		To:       to,
+		Value:    20, // 固定挖矿奖励 20 个单位
+		Data:     []byte(data),
+		GasLimit: 0,
+		Nonce:    0,
 	}
-
-	// coinbase 输入：引用空交易 ID、输出索引为 -1，表示不消费任何 UTXO
-	txin := TXInput{[]byte{}, -1, nil, []byte(data)}
-	// coinbase 输出：向矿工地址发放固定奖励 20 个单位
-	txout := NewTXOutput(20, to)
-
-	tx := Transaction{nil, []TXInput{txin}, []TXOutput{*txout}}
 	tx.ID = tx.Hash()
-
-	return &tx
+	return tx
 }
 
 // NewTransaction 构造一笔普通转账交易
-// w：发送方钱包；to：接收方地址；amount：转账金额；UTXO：当前 UTXO 集合
-// 流程：查找可用 UTXO → 构造输入 → 构造输出（含找零）→ 签名
-func NewTransaction(w *wallet.Wallet, to string, amount int, UTXO *UTXOSet) *Transaction {
-	var inputs []TXInput
-	var outputs []TXOutput
-
-	// 根据发送方公钥哈希查找足够金额的可用 UTXO
-	pubKeyHash := wallet.PublicKeyHash(w.PublicKey)
-	acc, validOutputs := UTXO.FindSpendableOutputs(pubKeyHash, amount)
-
-	if acc < amount {
+// from/to：发送方和接收方地址（Base58 字节）
+// value：转账金额；privKey：发送方私钥用于签名；stateDB：用于读取 nonce 和校验余额
+func NewTransaction(from, to []byte, value int64, privKey ecdsa.PrivateKey, stateDB *StateDB) *Transaction {
+	// 检查发送方余额是否足够
+	if stateDB.GetBalance(from) < value {
 		log.Panic("Error: not enough funds")
 	}
 
-	// 将所有可用 UTXO 转换为交易输入
-	for txid, outs := range validOutputs {
-		txID, err := hex.DecodeString(txid)
-		utils.Handle(err)
-
-		for _, out := range outs {
-			// 输入引用历史 UTXO，Signature 和 PubKey 在签名阶段填充
-			input := TXInput{txID, out, nil, w.PublicKey}
-			inputs = append(inputs, input)
-		}
+	tx := &Transaction{
+		Type:     TxTypeTransfer,
+		From:     from,
+		To:       to,
+		Value:    value,
+		GasLimit: 21000,                  // 普通转账固定消耗 21000 Gas
+		Nonce:    stateDB.GetNonce(from), // 从状态层读取当前 nonce，防重放
 	}
-
-	from := fmt.Sprintf("%s", w.Address())
-
-	// 构造转账输出：向接收方转入指定金额
-	outputs = append(outputs, *NewTXOutput(amount, to))
-
-	// 若 UTXO 总额超出转账金额，构造找零输出返还给发送方
-	if acc > amount {
-		outputs = append(outputs, *NewTXOutput(acc-amount, from))
-	}
-
-	tx := Transaction{nil, inputs, outputs}
 	tx.ID = tx.Hash()
+	tx.Sign(privKey)
 
-	// 使用发送方私钥对交易进行签名，防止伪造
-	privKey := wallet.BytesToPrivateKey(w.PrivateKey)
-	UTXO.Blockchain.SignTransaction(&tx, *privKey)
-
-	return &tx
+	return tx
 }
 
-// IsCoinBase 判断当前交易是否为 coinbase 交易
-// 判断依据：只有一个输入，且该输入的交易 ID 为空，输出索引为 -1
-func (tx *Transaction) IsCoinBase() bool {
-	return len(tx.Inputs) == 1 && len(tx.Inputs[0].ID) == 0 && tx.Inputs[0].Out == -1
+// NewDeployTx 构造一笔合约部署交易
+// from：部署方地址；bytecode：编译后的合约字节码；gasLimit：愿意消耗的最大 Gas
+func NewDeployTx(from []byte, bytecode []byte, gasLimit uint64, privKey ecdsa.PrivateKey, stateDB *StateDB) *Transaction {
+	tx := &Transaction{
+		Type:     TxTypeDeploy,
+		From:     from,
+		To:       nil, // 部署时接收方为空，合约地址由链派生
+		Value:    0,
+		Data:     bytecode,
+		GasLimit: gasLimit,
+		Nonce:    stateDB.GetNonce(from),
+	}
+	tx.ID = tx.Hash()
+	tx.Sign(privKey)
+
+	return tx
 }
 
-// Sign 使用 ECDSA 私钥对交易的每个输入进行签名
-// prevTXs：输入所引用的历史交易映射（key 为交易 ID 的十六进制字符串）
-// 签名过程：对每个输入，将其 PubKey 临时替换为被引用输出的 PubKeyHash，序列化后签名
-func (tx *Transaction) Sign(privKey ecdsa.PrivateKey, prevTXs map[string]Transaction) {
-	// coinbase 交易无需签名
+// NewCallTx 构造一笔合约调用交易
+// from：调用方地址；to：合约地址；callData：ABI 编码的函数调用数据；value：附带的原生币数量
+func NewCallTx(from, to []byte, callData []byte, value int64, gasLimit uint64, privKey ecdsa.PrivateKey, stateDB *StateDB) *Transaction {
+	tx := &Transaction{
+		Type:     TxTypeCall,
+		From:     from,
+		To:       to,
+		Value:    value,
+		Data:     callData,
+		GasLimit: gasLimit,
+		Nonce:    stateDB.GetNonce(from),
+	}
+	tx.ID = tx.Hash()
+	tx.Sign(privKey)
+
+	return tx
+}
+
+// ─── 签名与验证 ──────────────────────────────────────────────
+
+// Sign 使用 ECDSA 私钥对整笔交易签名
+// 与 UTXO 模型不同，账户模型只需对整笔交易签名一次，不需要逐输入签名
+func (tx *Transaction) Sign(privKey ecdsa.PrivateKey) {
 	if tx.IsCoinBase() {
 		return
 	}
 
-	// 校验所有输入引用的历史交易是否合法
-	for _, in := range tx.Inputs {
-		if prevTXs[hex.EncodeToString(in.ID)].ID == nil {
-			log.Panic("ERROR: Previous transaction is not correct")
-		}
+	dataToSign := fmt.Sprintf("%x", tx.Hash())
+	r, s, err := ecdsa.Sign(rand.Reader, &privKey, []byte(dataToSign))
+	if err != nil {
+		log.Panic(err)
 	}
-
-	// 使用裁剪副本签名（Signature 和 PubKey 字段清空），避免循环依赖
-	txCopy := tx.TrimmedCopy()
-
-	for inId, in := range txCopy.Inputs {
-		prevTX := prevTXs[hex.EncodeToString(in.ID)]
-		txCopy.Inputs[inId].Signature = nil
-		// 临时将 PubKey 设为被引用输出的锁定脚本（PubKeyHash），作为签名数据的一部分
-		txCopy.Inputs[inId].PubKey = prevTX.Outputs[in.Out].PubKeyHash
-
-		// 将副本格式化为字符串作为待签名数据
-		dataToSign := fmt.Sprintf("%x\n", txCopy)
-
-		// 使用 ECDSA 签名，得到 (r, s) 并拼接存入对应输入的 Signature 字段
-		r, s, err := ecdsa.Sign(rand.Reader, &privKey, []byte(dataToSign))
-		utils.Handle(err)
-		signature := append(r.Bytes(), s.Bytes()...)
-
-		tx.Inputs[inId].Signature = signature
-		txCopy.Inputs[inId].PubKey = nil // 签名完成后清空，准备处理下一个输入
-	}
+	// 将 r、s 拼接为签名字节切片（各占一半）
+	tx.Signature = append(r.Bytes(), s.Bytes()...)
 }
 
-// Verify 验证交易中每个输入的 ECDSA 签名是否合法
-// prevTXs：输入引用的历史交易映射
-// 返回 true 表示所有输入的签名均通过验证
-func (tx *Transaction) Verify(prevTXs map[string]Transaction) bool {
-	// coinbase 交易无需验证签名
+// Verify 验证交易签名是否合法
+// pubKey：发送方公钥的原始字节（x、y 坐标各占一半拼接而成）
+func (tx *Transaction) Verify(pubKey []byte) bool {
 	if tx.IsCoinBase() {
 		return true
 	}
 
-	for _, in := range tx.Inputs {
-		if prevTXs[hex.EncodeToString(in.ID)].ID == nil {
-			log.Panic("Previous transaction not correct")
-		}
-	}
+	dataToVerify := fmt.Sprintf("%x", tx.Hash())
 
-	txCopy := tx.TrimmedCopy()
-	curve := elliptic.P256() // 使用与签名时相同的 P-256 椭圆曲线
+	// 从签名字节切片中还原 r、s 分量
+	r, s := big.Int{}, big.Int{}
+	sigLen := len(tx.Signature)
+	r.SetBytes(tx.Signature[:(sigLen / 2)])
+	s.SetBytes(tx.Signature[(sigLen / 2):])
 
-	for inId, in := range tx.Inputs {
-		prevTx := prevTXs[hex.EncodeToString(in.ID)]
-		txCopy.Inputs[inId].Signature = nil
-		txCopy.Inputs[inId].PubKey = prevTx.Outputs[in.Out].PubKeyHash
+	// 从公钥字节切片中还原 x、y 坐标
+	x, y := big.Int{}, big.Int{}
+	keyLen := len(pubKey)
+	x.SetBytes(pubKey[:(keyLen / 2)])
+	y.SetBytes(pubKey[(keyLen / 2):])
 
-		// 从 Signature 字节切片中还原 ECDSA 签名的 r、s 分量（各占一半）
-		r := big.Int{}
-		s := big.Int{}
-		sigLen := len(in.Signature)
-		r.SetBytes(in.Signature[:(sigLen / 2)])
-		s.SetBytes(in.Signature[(sigLen / 2):])
+	curve := elliptic.P256()
+	rawPubKey := ecdsa.PublicKey{Curve: curve, X: &x, Y: &y}
 
-		// 从 PubKey 字节切片中还原 ECDSA 公钥的 x、y 坐标（各占一半）
-		x := big.Int{}
-		y := big.Int{}
-		keyLen := len(in.PubKey)
-		x.SetBytes(in.PubKey[:(keyLen / 2)])
-		y.SetBytes(in.PubKey[(keyLen / 2):])
-
-		dataToVerify := fmt.Sprintf("%x\n", txCopy)
-
-		// 用还原的公钥验证签名
-		rawPubKey := ecdsa.PublicKey{Curve: curve, X: &x, Y: &y}
-		if ecdsa.Verify(&rawPubKey, []byte(dataToVerify), &r, &s) == false {
-			return false
-		}
-		txCopy.Inputs[inId].PubKey = nil // 清空，准备验证下一个输入
-	}
-
-	return true
+	return ecdsa.Verify(&rawPubKey, []byte(dataToVerify), &r, &s)
 }
 
-// TrimmedCopy 返回交易的裁剪副本：每个输入的 Signature 和 PubKey 均置为 nil
-// 用于签名和验证流程，确保待签名/验证的数据中不含敏感字段
-func (tx *Transaction) TrimmedCopy() Transaction {
-	var inputs []TXInput
-	var outputs []TXOutput
+// ─── 辅助方法 ────────────────────────────────────────────────
 
-	for _, in := range tx.Inputs {
-		inputs = append(inputs, TXInput{in.ID, in.Out, nil, nil})
-	}
-
-	for _, out := range tx.Outputs {
-		outputs = append(outputs, TXOutput{out.Value, out.PubKeyHash})
-	}
-
-	txCopy := Transaction{tx.ID, inputs, outputs}
-
-	return txCopy
+// IsCoinBase 判断是否为 coinbase 交易
+// 判断依据：发送方为 nil 且类型为普通转账
+func (tx *Transaction) IsCoinBase() bool {
+	return tx.From == nil && tx.Type == TxTypeTransfer
 }
 
-// String 返回交易的可读字符串表示，用于调试和日志输出
-// 格式化展示交易 ID、所有输入（含 TXID、索引、签名、公钥）和所有输出（含金额、锁定脚本）
+// String 返回交易的可读字符串，用于调试和日志输出
 func (tx Transaction) String() string {
 	var lines []string
 
 	lines = append(lines, fmt.Sprintf("--- Transaction %x:", tx.ID))
-	for i, input := range tx.Inputs {
-		lines = append(lines, fmt.Sprintf("     Input %d:", i))
-		lines = append(lines, fmt.Sprintf("       TXID:     %x", input.ID))
-		lines = append(lines, fmt.Sprintf("       Out:       %d", input.Out))
-		lines = append(lines, fmt.Sprintf("       Signature: %x", input.Signature))
-		lines = append(lines, fmt.Sprintf("       PubKey:    %x", input.PubKey))
-	}
+	lines = append(lines, fmt.Sprintf("    Type:      %d", tx.Type))
+	lines = append(lines, fmt.Sprintf("    From:      %x", tx.From))
+	lines = append(lines, fmt.Sprintf("    To:        %x", tx.To))
+	lines = append(lines, fmt.Sprintf("    Value:     %d", tx.Value))
+	lines = append(lines, fmt.Sprintf("    Nonce:     %d", tx.Nonce))
+	lines = append(lines, fmt.Sprintf("    GasLimit:  %d", tx.GasLimit))
+	lines = append(lines, fmt.Sprintf("    Signature: %x", tx.Signature))
 
-	for i, output := range tx.Outputs {
-		lines = append(lines, fmt.Sprintf("     Output %d:", i))
-		lines = append(lines, fmt.Sprintf("       Value:  %d", output.Value))
-		lines = append(lines, fmt.Sprintf("       Script: %x", output.PubKeyHash))
+	if len(tx.Data) > 0 {
+		lines = append(lines, fmt.Sprintf("    Data:      %x", tx.Data))
 	}
 
 	return strings.Join(lines, "\n")

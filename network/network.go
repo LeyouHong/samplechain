@@ -26,10 +26,11 @@ const (
 // 全局变量
 var (
 	nodeAddress     string                                    // 当前节点的地址（格式：localhost:PORT）
-	mineAddress     string                                    // 矿工钱包地址，不为空时节点参与挖矿
+	mineAddress     string                                    // 矿工钱包地址（Base58 字符串），不为空时节点参与挖矿
 	KnownNodes      = []string{"localhost:3000"}              // 已知节点列表，localhost:3000 为默认种子节点
 	blocksInTransit = [][]byte{}                              // 正在同步中（待下载）的区块哈希列表
 	memoryPool      = make(map[string]blockchain.Transaction) // 内存池：存放待打包的交易，key 为交易 ID 的十六进制字符串
+	stateDB         *blockchain.StateDB                       // 账户状态层，在 StartServer 时初始化，供交易验证和挖矿使用
 )
 
 // ─── 消息结构体 ─────────────────────────────────────────────
@@ -80,28 +81,22 @@ type Version struct {
 // ─── 命令编解码工具 ─────────────────────────────────────────
 
 // CmdToBytes 将命令字符串编码为固定 commandLength 字节的字节数组
-// 不足部分用 0x0 填充，用于构造消息头
 func CmdToBytes(cmd string) []byte {
 	var bytes [commandLength]byte
-
 	for i, c := range cmd {
 		bytes[i] = byte(c)
 	}
-
 	return bytes[:]
 }
 
-// BytesToCmd 将固定长度的字节数组解码回命令字符串
-// 过滤掉填充的 0x0 字节
+// BytesToCmd 将固定长度的字节数组解码回命令字符串，过滤掉填充的 0x0 字节
 func BytesToCmd(bytes []byte) string {
 	var cmd []byte
-
 	for _, b := range bytes {
 		if b != 0x0 {
 			cmd = append(cmd, b)
 		}
 	}
-
 	return fmt.Sprintf("%s", cmd)
 }
 
@@ -127,7 +122,6 @@ func SendAddr(address string) {
 	nodes.AddrList = append(nodes.AddrList, nodeAddress)
 	payload := GobEncode(nodes)
 	request := append(CmdToBytes("addr"), payload...)
-
 	SendData(address, request)
 }
 
@@ -136,7 +130,6 @@ func SendBlock(addr string, b *blockchain.Block) {
 	data := Block{nodeAddress, b.Serialize()}
 	payload := GobEncode(data)
 	request := append(CmdToBytes("block"), payload...)
-
 	SendData(addr, request)
 }
 
@@ -144,23 +137,17 @@ func SendBlock(addr string, b *blockchain.Block) {
 // 若连接失败，则将该节点从 KnownNodes 中移除
 func SendData(addr string, data []byte) {
 	conn, err := net.Dial(protocol, addr)
-
 	if err != nil {
 		fmt.Printf("%s is not available\n", addr)
-		// 节点不可达，从已知节点列表中移除
 		var updatedNodes []string
-
 		for _, node := range KnownNodes {
 			if node != addr {
 				updatedNodes = append(updatedNodes, node)
 			}
 		}
-
 		KnownNodes = updatedNodes
-
 		return
 	}
-
 	defer conn.Close()
 
 	_, err = io.Copy(conn, bytes.NewReader(data))
@@ -174,7 +161,6 @@ func SendInv(address, kind string, items [][]byte) {
 	inventory := Inv{nodeAddress, kind, items}
 	payload := GobEncode(inventory)
 	request := append(CmdToBytes("inv"), payload...)
-
 	SendData(address, request)
 }
 
@@ -182,7 +168,6 @@ func SendInv(address, kind string, items [][]byte) {
 func SendGetBlocks(address string) {
 	payload := GobEncode(GetBlocks{nodeAddress})
 	request := append(CmdToBytes("getblocks"), payload...)
-
 	SendData(address, request)
 }
 
@@ -190,7 +175,6 @@ func SendGetBlocks(address string) {
 func SendGetData(address, kind string, id []byte) {
 	payload := GobEncode(GetData{nodeAddress, kind, id})
 	request := append(CmdToBytes("getdata"), payload...)
-
 	SendData(address, request)
 }
 
@@ -199,7 +183,6 @@ func SendTx(addr string, tnx *blockchain.Transaction) {
 	data := Tx{nodeAddress, tnx.Serialize()}
 	payload := GobEncode(data)
 	request := append(CmdToBytes("tx"), payload...)
-
 	SendData(addr, request)
 }
 
@@ -207,9 +190,7 @@ func SendTx(addr string, tnx *blockchain.Transaction) {
 func SendVersion(addr string, chain *blockchain.BlockChain) {
 	bestHeight := chain.GetBestHeight()
 	payload := GobEncode(Version{version, bestHeight, nodeAddress})
-
 	request := append(CmdToBytes("version"), payload...)
-
 	SendData(addr, request)
 }
 
@@ -225,7 +206,6 @@ func HandleAddr(request []byte) {
 	err := dec.Decode(&payload)
 	if err != nil {
 		log.Panic(err)
-
 	}
 
 	KnownNodes = append(KnownNodes, payload.AddrList...)
@@ -234,7 +214,8 @@ func HandleAddr(request []byte) {
 }
 
 // HandleBlock 处理收到的 block 消息：反序列化区块并添加到本地链
-// 若还有待同步的区块，继续请求下一个；否则重建 UTXO 索引
+// 账户模型下不再需要重建 UTXO 索引
+// TODO: 区块同步完成后，需遍历区块内交易并 apply 到 stateDB 保持状态一致
 func HandleBlock(request []byte, chain *blockchain.BlockChain) {
 	var buff bytes.Buffer
 	var payload Block
@@ -246,24 +227,20 @@ func HandleBlock(request []byte, chain *blockchain.BlockChain) {
 		log.Panic(err)
 	}
 
-	blockData := payload.Block
-	block := blockchain.Deserialize(blockData)
+	block := blockchain.Deserialize(payload.Block)
 
 	fmt.Println("Recevied a new block!")
 	chain.AddBlock(block)
-
 	fmt.Printf("Added block %x\n", block.Hash)
 
 	if len(blocksInTransit) > 0 {
 		// 还有未下载的区块，继续请求队列中的下一个
 		blockHash := blocksInTransit[0]
 		SendGetData(payload.AddrFrom, "block", blockHash)
-
 		blocksInTransit = blocksInTransit[1:]
 	} else {
-		// 所有区块同步完毕，重建 UTXO 集合
-		UTXOSet := blockchain.UTXOSet{chain}
-		UTXOSet.Reindex()
+		// 所有区块同步完毕
+		fmt.Println("All blocks synced")
 	}
 }
 
@@ -282,19 +259,14 @@ func HandleInv(request []byte, chain *blockchain.BlockChain) {
 	fmt.Printf("Recevied inventory with %d %s\n", len(payload.Items), payload.Type)
 
 	if payload.Type == "block" {
-
 		// 处理空 inventory 的边界情况，避免节点卡死
 		if len(payload.Items) == 0 {
 			fmt.Println("No blocks in inventory, requesting again or waiting...")
-			// 重新发起 getblocks 请求
 			SendGetBlocks(payload.AddrFrom)
 			return
 		}
 
-		// 将所有待下载的区块哈希存入 blocksInTransit
 		blocksInTransit = payload.Items
-
-		// 立即请求第一个区块
 		blockHash := payload.Items[0]
 		SendGetData(payload.AddrFrom, "block", blockHash)
 
@@ -310,7 +282,6 @@ func HandleInv(request []byte, chain *blockchain.BlockChain) {
 
 	if payload.Type == "tx" {
 		txID := payload.Items[0]
-
 		// 若内存池中尚未有该交易，则向对方请求完整交易数据
 		if memoryPool[hex.EncodeToString(txID)].ID == nil {
 			SendGetData(payload.AddrFrom, "tx", txID)
@@ -331,7 +302,6 @@ func HandleGetBlocks(request []byte, chain *blockchain.BlockChain) {
 	}
 
 	blocks := chain.GetBlockHashes()
-
 	SendInv(payload.AddrFrom, "block", blocks)
 }
 
@@ -352,14 +322,12 @@ func HandleGetData(request []byte, chain *blockchain.BlockChain) {
 		if err != nil {
 			return
 		}
-
 		SendBlock(payload.AddrFrom, &block)
 	}
 
 	if payload.Type == "tx" {
 		txID := hex.EncodeToString(payload.ID)
 		tx := memoryPool[txID]
-
 		SendTx(payload.AddrFrom, &tx)
 	}
 }
@@ -378,21 +346,20 @@ func HandleTx(request []byte, chain *blockchain.BlockChain) {
 		log.Panic(err)
 	}
 
-	txData := payload.Transaction
-	tx := blockchain.DeserializeTransaction(txData)
+	tx := blockchain.DeserializeTransaction(payload.Transaction)
 	memoryPool[hex.EncodeToString(tx.ID)] = tx
 
-	fmt.Printf("%s, %d", nodeAddress, len(memoryPool))
+	fmt.Printf("%s, %d\n", nodeAddress, len(memoryPool))
 
 	if nodeAddress == KnownNodes[0] {
-		// 当前节点是种子节点，负责将交易广播给其他节点
+		// 当前节点是种子节点，负责将交易 ID 广播给其他节点
 		for _, node := range KnownNodes {
 			if node != nodeAddress && node != payload.AddrFrom {
 				SendInv(node, "tx", [][]byte{tx.ID})
 			}
 		}
 	} else {
-		// 当前节点是普通/矿工节点，内存池积累足够交易后开始挖矿
+		// 当前节点是矿工节点，内存池积累足够交易后开始挖矿
 		if len(memoryPool) >= 2 && len(mineAddress) > 0 {
 			MineTx(chain)
 		}
@@ -400,15 +367,14 @@ func HandleTx(request []byte, chain *blockchain.BlockChain) {
 }
 
 // MineTx 从内存池中取出有效交易，附加 coinbase 奖励交易后打包新区块
-// 挖矿成功后广播新区块，并清空已打包的交易；若内存池仍有剩余则递归继续挖矿
+// 挖矿成功后广播新区块，清空已打包的交易；若内存池仍有剩余则递归继续挖矿
 func MineTx(chain *blockchain.BlockChain) {
 	var txs []*blockchain.Transaction
 
-	// 验证内存池中的每笔交易，筛选出合法交易
+	// 用 stateDB 验证内存池中每笔交易的签名和 nonce，筛选出合法交易
 	for id := range memoryPool {
-		fmt.Printf("tx: %s\n", memoryPool[id].ID)
 		tx := memoryPool[id]
-		if chain.VerifyTransaction(&tx) {
+		if chain.VerifyTransaction(&tx, stateDB) {
 			txs = append(txs, &tx)
 		}
 	}
@@ -418,21 +384,18 @@ func MineTx(chain *blockchain.BlockChain) {
 		return
 	}
 
-	// 创建 coinbase 交易（矿工奖励），并加入待打包列表
-	cbTx := blockchain.CoinBaseTx(mineAddress, "")
+	// mineAddress 是 Base58 字符串，转为 []byte 传给新版 CoinBaseTx
+	cbTx := blockchain.CoinBaseTx([]byte(mineAddress), "")
 	txs = append(txs, cbTx)
 
-	// 挖出新区块并重建 UTXO 索引
-	newBlock := chain.MineBlock(txs)
-	UTXOSet := blockchain.UTXOSet{chain}
-	UTXOSet.Reindex()
+	// 挖出新区块，MineBlock 内部会执行状态变更（转账、nonce 更新）并持久化
+	newBlock := chain.MineBlock(txs, stateDB)
 
 	fmt.Println("New Block mined")
 
 	// 将已打包的交易从内存池中删除
 	for _, tx := range txs {
-		txID := hex.EncodeToString(tx.ID)
-		delete(memoryPool, txID)
+		delete(memoryPool, hex.EncodeToString(tx.ID))
 	}
 
 	// 将新区块哈希广播给所有其他已知节点
@@ -448,10 +411,7 @@ func MineTx(chain *blockchain.BlockChain) {
 	}
 }
 
-// HandleVersion 处理收到的 version 握手消息，通过比较区块高度决定同步方向：
-// - 本地高度更低：向对方请求缺失的区块
-// - 本地高度更高：将自己的版本信息回送给对方
-// 同时将未知节点加入 KnownNodes
+// HandleVersion 处理收到的 version 握手消息，通过比较区块高度决定同步方向
 func HandleVersion(request []byte, chain *blockchain.BlockChain) {
 	var buff bytes.Buffer
 	var payload Version
@@ -489,6 +449,7 @@ func HandleConnection(conn net.Conn, chain *blockchain.BlockChain) {
 	if err != nil {
 		log.Panic(err)
 	}
+
 	command := BytesToCmd(req[:commandLength])
 	fmt.Printf("Received %s command\n", command)
 
@@ -510,18 +471,18 @@ func HandleConnection(conn net.Conn, chain *blockchain.BlockChain) {
 	default:
 		fmt.Println("Unknown command")
 	}
-
 }
 
 // StartServer 启动区块链节点服务器：
 // 1. 初始化节点地址和矿工地址
 // 2. 监听 TCP 端口
-// 3. 加载本地区块链数据库
+// 3. 加载本地区块链数据库，初始化 stateDB
 // 4. 若不是种子节点，主动向种子节点发送 version 握手消息
 // 5. 循环接受并发处理连接
 func StartServer(nodeID, minerAddress string) {
 	nodeAddress = fmt.Sprintf("localhost:%s", nodeID)
 	mineAddress = minerAddress
+
 	ln, err := net.Listen(protocol, nodeAddress)
 	if err != nil {
 		log.Panic(err)
@@ -530,18 +491,22 @@ func StartServer(nodeID, minerAddress string) {
 
 	chain := blockchain.ContinueBlockChain(nodeID)
 	defer chain.Database.Close()
-	go CloseDB(chain) // 启动后台 goroutine 监听系统退出信号，优雅关闭数据库
+
+	// 初始化状态层，复用区块链数据库，通过 state: 前缀与区块数据隔离
+	stateDB = blockchain.NewStateDB(chain.Database)
+
+	go CloseDB(chain)
 
 	if nodeAddress != KnownNodes[0] {
-		// 非种子节点：主动连接种子节点进行握手同步
 		SendVersion(KnownNodes[0], chain)
 	}
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			log.Panic(err)
 		}
-		go HandleConnection(conn, chain) // 每个连接开一个 goroutine 并发处理
+		go HandleConnection(conn, chain)
 	}
 }
 
@@ -550,13 +515,11 @@ func StartServer(nodeID, minerAddress string) {
 // GobEncode 将任意 Go 数据结构使用 gob 编码序列化为字节切片
 func GobEncode(data interface{}) []byte {
 	var buff bytes.Buffer
-
 	enc := gob.NewEncoder(&buff)
 	err := enc.Encode(data)
 	if err != nil {
 		log.Panic(err)
 	}
-
 	return buff.Bytes()
 }
 
@@ -567,7 +530,6 @@ func NodeIsKnown(addr string) bool {
 			return true
 		}
 	}
-
 	return false
 }
 
@@ -575,17 +537,14 @@ func NodeIsKnown(addr string) bool {
 // 收到信号后优雅关闭区块链数据库并退出进程，防止数据损坏
 func CloseDB(chain *blockchain.BlockChain) {
 	sigs := make(chan os.Signal, 1)
-
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 
 	go func() {
 		<-sigs
 		log.Println("Shutting down blockchain node...")
-
 		if chain.Database != nil {
 			_ = chain.Database.Close()
 		}
-
 		os.Exit(0)
 	}()
 }
